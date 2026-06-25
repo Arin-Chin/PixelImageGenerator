@@ -5,7 +5,7 @@
 **像素画编辑器 · Pixel Art Editor**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![GitHub Pages](https://img.shields.io/badge/GitHub-Pages-222222?logo=github-pages&logoColor=white)](https://your-username.github.io/PixelAvatarGenerator)
+[![GitHub Pages](https://img.shields.io/badge/GitHub-Pages-222222?logo=github-pages&logoColor=white)](https://arin-chin.github.io/PixelImageGenerator/)
 
 > 🖌 将任意图片转换为像素风格，并用画笔工具精修。离线可用，无需后端。
 > Convert any image into pixel art, then refine it with paint tools. Works offline, no backend needed.
@@ -47,7 +47,7 @@
 ## 🚀 Quick Start / 快速开始
 
 ### 🌐 Online (GitHub Pages)
-[Click here to use it online](https://your-username.github.io/PixelAvatarGenerator)
+[Click here to use it online](https://arin-chin.github.io/PixelImageGenerator/)
 
 ### 📦 Local
 Just open `index.html` in any modern browser — that's it.
