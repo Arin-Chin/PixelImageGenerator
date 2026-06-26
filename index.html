@@ -42,7 +42,6 @@
     width: 100%;
     flex-wrap: wrap;
     justify-content: center;
-    align-items: flex-start;
   }
 
   /* ─── Sidebar ─── */
@@ -52,14 +51,6 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
-  }
-
-  .canvas-area {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
   }
 
   .panel {
@@ -302,15 +293,7 @@
 
   /* ─── Responsive ─── */
   @media (max-width: 900px) {
-    .app-container {
-    display: flex;
-    gap: 20px;
-    max-width: 1100px;
-    width: 100%;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: flex-start;
-  }
+    .app-container { flex-direction: column; align-items: center; }
     .sidebar { width: 100%; max-width: 512px; }
     .canvas-area { order: -1; }
   }
@@ -335,13 +318,8 @@
 <body>
 
 <div class="app-container">
-<div class="canvas-area">
-    <div class="canvas-wrapper paint-mode" id="canvasWrapper">
-      <canvas id="mainCanvas" width="512" height="512"></canvas>
-    </div>
-    <div class="canvas-info" id="canvasInfo">未加载图片</div>
-  </div>
-<div class="sidebar">
+  <!-- ─── LEFT SIDEBAR ─── -->
+  <div class="sidebar">
     <!-- Header -->
     <div class="panel">
       <div class="app-title"><span>🎨</span> 像素画编辑器</div>
@@ -429,5 +407,833 @@
       </button>
     </div>
   </div>
-</div></body>
+
+  <!-- ─── RIGHT CANVAS AREA ─── -->
+  <div class="canvas-area">
+    <div class="canvas-wrapper paint-mode" id="canvasWrapper">
+      <canvas id="mainCanvas" width="512" height="512"></canvas>
+    </div>
+    <div class="canvas-info" id="canvasInfo">未加载图片</div>
+  </div>
+</div>
+
+<!-- Hidden canvases for processing -->
+<canvas id="offscreenCanvas" style="display:none;"></canvas>
+
+<script>
+(function() {
+  'use strict';
+
+  // ──────────────────────────────────────────────
+  // DOM References
+  // ──────────────────────────────────────────────
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => document.querySelectorAll(sel);
+
+  const mainCanvas = $('#mainCanvas');
+  const mainCtx = mainCanvas.getContext('2d');
+  const offscreenCanvas = $('#offscreenCanvas');
+  const offCtx = offscreenCanvas.getContext('2d');
+  const canvasWrapper = $('#canvasWrapper');
+
+  const fileInput = $('#fileInput');
+  const blockSizeInput = $('#blockSizeInput');
+  const pixelateBtn = $('#pixelateBtn');
+  const toolPaint = $('#toolPaint');
+  const toolEyedropper = $('#toolEyedropper');
+  const toolResetPixel = $('#toolResetPixel');
+  const activeColorSwatch = $('#activeColorSwatch');
+  const activeColorHex = $('#activeColorHex');
+  const colorPicker = $('#colorPicker');
+  const hexInput = $('#hexInput');
+  const applyHexBtn = $('#applyHexBtn');
+  const undoBtn = $('#undoBtn');
+  const redoBtn = $('#redoBtn');
+  const exportPng = $('#exportPng');
+  const exportJpg = $('#exportJpg');
+  const exportWebp = $('#exportWebp');
+  const exportEnlarge = $('#exportEnlarge');
+  const exportScale = $('#exportScale');
+  const exportScaleRow = $('#exportScaleRow');
+  const exportSizeInfo = $('#exportSizeInfo');
+  const resetAllBtn = $('#resetAllBtn');
+  const paletteGrid = $('#paletteGrid');
+  const canvasInfo = $('#canvasInfo');
+
+  // ──────────────────────────────────────────────
+  // State
+  // ──────────────────────────────────────────────
+  const state = {
+    hasImage: false,
+    hasPixelated: false,
+    imageWidth: 0,
+    imageHeight: 0,
+    blocksX: 0,
+    blocksY: 0,
+    blockSize: 16,
+    originalData: null,      // Uint8ClampedArray (blocksX * blocksY * 4)
+    currentData: null,       // Uint8ClampedArray
+    activeColor: [0, 0, 0, 255],
+    currentTool: 'paint',    // 'paint' | 'eyedropper' | 'resetPixel'
+    undoStack: [],
+    redoStack: [],
+    maxUndo: 100,
+    // stroke tracking
+    isDrawing: false,
+    currentStroke: null,     // { changes: [] }
+    strokeVisited: null,     // Set of block indices already visited in this stroke
+  };
+
+  // ──────────────────────────────────────────────
+  // Preset Colors
+  // ──────────────────────────────────────────────
+  const presetColors = [
+    // Row 1: Grayscale
+    '#FFFFFF','#E0E0E0','#C0C0C0','#A0A0A0','#808080','#606060','#404040','#202020',
+    // Row 2: Basic rainbow
+    '#FF0000','#FF4400','#FF8800','#FFCC00','#CCFF00','#44FF00','#00FF00','#00FF44',
+    // Row 3: Cool spectrum
+    '#00FF88','#00FFCC','#00FFFF','#00CCFF','#0088FF','#0044FF','#0000FF','#4400FF',
+    // Row 4: Purples & pinks
+    '#8800FF','#CC00FF','#FF00FF','#FF00CC','#FF0088','#FF0044','#000000','#111111',
+    // Row 5: Earth & warm
+    '#8B4513','#A0522D','#CD853F','#DEB887','#F5DEB3','#D2B48C','#BC8F8F','#A0522D',
+    // Row 6: Skin tones
+    '#FFE0BD','#FFCD94','#E8B87A','#D4A06A','#C08A5C','#A67044','#8C5830','#6B3F20',
+    // Row 7: Vivid / UI
+    '#FF6B6B','#FFE66D','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD','#98D8C8',
+    // Row 8: Muted / pastel
+    '#FFD1DC','#E6E6FA','#B5EAD7','#C7CEEA','#FFDAC1','#E2F0CB','#B5D8EB','#F0E6EF',
+  ];
+
+  // ──────────────────────────────────────────────
+  // Color Utilities
+  // ──────────────────────────────────────────────
+  function hexToRgba(hex) {
+    const h = hex.replace('#', '');
+    if (h.length === 6) {
+      return [
+        parseInt(h.substring(0,2), 16),
+        parseInt(h.substring(2,4), 16),
+        parseInt(h.substring(4,6), 16),
+        255
+      ];
+    }
+    return [0,0,0,255];
+  }
+
+  function rgbaToHex(rgba) {
+    const r = rgba[0].toString(16).padStart(2,'0');
+    const g = rgba[1].toString(16).padStart(2,'0');
+    const b = rgba[2].toString(16).padStart(2,'0');
+    return `#${r}${g}${b}`.toUpperCase();
+  }
+
+  function rgbaToCss(rgba) {
+    return `rgba(${rgba[0]},${rgba[1]},${rgba[2]},${rgba[3]/255})`;
+  }
+
+  function avgColor(rgbaArray) {
+    // rgbaArray is an array of [r,g,b,a] values
+    if (rgbaArray.length === 0) return [0,0,0,0];
+    let r=0,g=0,b=0,a=0;
+    const count = rgbaArray.length;
+    for (let i = 0; i < count; i++) {
+      r += rgbaArray[i][0];
+      g += rgbaArray[i][1];
+      b += rgbaArray[i][2];
+      a += rgbaArray[i][3];
+    }
+    return [
+      Math.round(r / count),
+      Math.round(g / count),
+      Math.round(b / count),
+      Math.round(a / count)
+    ];
+  }
+
+  // ──────────────────────────────────────────────
+  // Set Active Color
+  // ──────────────────────────────────────────────
+  function setActiveColor(rgba, source) {
+    state.activeColor = [...rgba];
+    activeColorSwatch.style.background = rgbaToCss(rgba);
+    const hex = rgbaToHex(rgba);
+    activeColorHex.textContent = hex;
+    if (source !== 'colorPicker') colorPicker.value = hex;
+    if (source !== 'hexInput') hexInput.value = hex;
+    updatePaletteActive();
+  }
+
+  // ──────────────────────────────────────────────
+  // Palette
+  // ──────────────────────────────────────────────
+  function buildPalette() {
+    paletteGrid.innerHTML = '';
+    presetColors.forEach(hex => {
+      const swatch = document.createElement('div');
+      swatch.className = 'palette-swatch';
+      swatch.style.background = hex;
+      swatch.title = hex;
+      swatch.dataset.hex = hex;
+      swatch.addEventListener('click', () => {
+        const rgba = hexToRgba(hex);
+        setActiveColor(rgba, 'palette');
+      });
+      paletteGrid.appendChild(swatch);
+    });
+    updatePaletteActive();
+  }
+
+  function updatePaletteActive() {
+    const currentHex = rgbaToHex(state.activeColor);
+    $$('.palette-swatch').forEach(s => {
+      s.classList.toggle('active', s.dataset.hex.toUpperCase() === currentHex);
+    });
+  }
+
+  colorPicker.addEventListener('input', () => {
+    const rgba = hexToRgba(colorPicker.value);
+    setActiveColor(rgba, 'colorPicker');
+  });
+
+  hexInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') applyHexColor();
+  });
+  applyHexBtn.addEventListener('click', applyHexColor);
+
+  function applyHexColor() {
+    let val = hexInput.value.trim();
+    if (!val.startsWith('#')) val = '#' + val;
+    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+      const rgba = hexToRgba(val);
+      setActiveColor(rgba, 'hexInput');
+    }
+  }
+
+  buildPalette();
+
+  // ──────────────────────────────────────────────
+  // Block Index Calculation
+  // ──────────────────────────────────────────────
+  function getBlockIndex(canvasX, canvasY) {
+    const bx = Math.min(Math.floor(canvasX / state.blockSize), state.blocksX - 1);
+    const by = Math.min(Math.floor(canvasY / state.blockSize), state.blocksY - 1);
+    const index = by * state.blocksX + bx;
+    return { bx, by, index };
+  }
+
+  function getBlockPixelRect(bx, by) {
+    const x = bx * state.blockSize;
+    const y = by * state.blockSize;
+    const w = (bx === state.blocksX - 1) ? (512 - x) : state.blockSize;
+    const h = (by === state.blocksY - 1) ? (512 - y) : state.blockSize;
+    return { x, y, w, h };
+  }
+
+  function getColorAtIndex(data, index) {
+    const i = index * 4;
+    return [data[i], data[i+1], data[i+2], data[i+3]];
+  }
+
+  function setColorAtIndex(data, index, rgba) {
+    const i = index * 4;
+    data[i] = rgba[0];
+    data[i+1] = rgba[1];
+    data[i+2] = rgba[2];
+    data[i+3] = rgba[3];
+  }
+
+  function copyColorFromTo(src, dst, index) {
+    const i = index * 4;
+    dst[i] = src[i];
+    dst[i+1] = src[i+1];
+    dst[i+2] = src[i+2];
+    dst[i+3] = src[i+3];
+  }
+
+  // ──────────────────────────────────────────────
+  // Canvas Mouse Coordinate Mapping
+  // ──────────────────────────────────────────────
+  function canvasCoords(e) {
+    const rect = mainCanvas.getBoundingClientRect();
+    const scaleX = 512 / rect.width;
+    const scaleY = 512 / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+    };
+  }
+
+  // ──────────────────────────────────────────────
+  // Image Import
+  // ──────────────────────────────────────────────
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        // Draw image onto offscreen canvas at 512×512, preserving aspect ratio
+        offscreenCanvas.width = 512;
+        offscreenCanvas.height = 512;
+        offCtx.clearRect(0, 0, 512, 512);
+
+        // Calculate fit
+        const scale = Math.min(512 / img.width, 512 / img.height);
+        const drawW = Math.round(img.width * scale);
+        const drawH = Math.round(img.height * scale);
+        const offsetX = Math.floor((512 - drawW) / 2);
+        const offsetY = Math.floor((512 - drawH) / 2);
+
+        offCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
+
+        // Show preview on main canvas
+        mainCtx.clearRect(0, 0, 512, 512);
+        mainCtx.drawImage(offscreenCanvas, 0, 0);
+
+        state.hasImage = true;
+        state.imageWidth = img.width;
+        state.imageHeight = img.height;
+        state.hasPixelated = false;
+        state.undoStack = [];
+        state.redoStack = [];
+        updateUndoRedoBtns();
+        pixelateBtn.disabled = false;
+        updateExportBtns();
+        updateEditToolState();
+        resetAllBtn.disabled = true;
+        updateCanvasInfo();
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // ──────────────────────────────────────────────
+  // Pixelation Engine
+  // ──────────────────────────────────────────────
+  pixelateBtn.addEventListener('click', () => {
+    if (!state.hasImage) return;
+
+    const blockSize = parseInt(blockSizeInput.value);
+    if (isNaN(blockSize) || blockSize < 1) {
+      alert('请输入有效的像素块大小（≥1）');
+      return;
+    }
+
+    // Clamp blockSize
+    const clampedBS = Math.max(1, Math.min(512, blockSize));
+    if (clampedBS !== blockSize) {
+      blockSizeInput.value = clampedBS;
+    }
+
+    state.blockSize = clampedBS;
+    state.blocksX = Math.ceil(512 / state.blockSize);
+    state.blocksY = Math.ceil(512 / state.blockSize);
+
+    const totalBlocks = state.blocksX * state.blocksY;
+    const imgData = offCtx.getImageData(0, 0, 512, 512);
+    const src = imgData.data; // Uint8ClampedArray
+
+    const original = new Uint8ClampedArray(totalBlocks * 4);
+
+    // For each block, average the colors
+    for (let by = 0; by < state.blocksY; by++) {
+      for (let bx = 0; bx < state.blocksX; bx++) {
+        const rect = getBlockPixelRect(bx, by);
+        const colors = [];
+
+        for (let py = rect.y; py < rect.y + rect.h; py++) {
+          for (let px = rect.x; px < rect.x + rect.w; px++) {
+            const si = (py * 512 + px) * 4;
+            colors.push([src[si], src[si+1], src[si+2], src[si+3]]);
+          }
+        }
+
+        const avg = avgColor(colors);
+        const idx = (by * state.blocksX + bx);
+        setColorAtIndex(original, idx, avg);
+      }
+    }
+
+    state.originalData = original;
+    state.currentData = new Uint8ClampedArray(original);
+    state.undoStack = [];
+    state.redoStack = [];
+    state.hasPixelated = true;
+
+    renderToDisplay();
+    updateUndoRedoBtns();
+    updateExportBtns();
+    updateEditToolState();
+    resetAllBtn.disabled = false;
+    updateCanvasInfo();
+  });
+
+  // ──────────────────────────────────────────────
+  // Display Rendering
+  // ──────────────────────────────────────────────
+  function renderToDisplay() {
+    if (!state.hasPixelated) return;
+    mainCtx.clearRect(0, 0, 512, 512);
+
+    for (let by = 0; by < state.blocksY; by++) {
+      for (let bx = 0; bx < state.blocksX; bx++) {
+        const rect = getBlockPixelRect(bx, by);
+        const idx = by * state.blocksX + bx;
+        const rgba = getColorAtIndex(state.currentData, idx);
+        mainCtx.fillStyle = rgbaToCss(rgba);
+        mainCtx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      }
+    }
+  }
+
+  function renderBlock(bx, by) {
+    const rect = getBlockPixelRect(bx, by);
+    const idx = by * state.blocksX + bx;
+    const rgba = getColorAtIndex(state.currentData, idx);
+    mainCtx.fillStyle = rgbaToCss(rgba);
+    mainCtx.fillRect(rect.x, rect.y, rect.w, rect.h);
+  }
+
+  // ──────────────────────────────────────────────
+  // Block Hover Highlight
+  // ──────────────────────────────────────────────
+  let hoveredBlock = null;
+
+  mainCanvas.addEventListener('mousemove', (e) => {
+    const coords = canvasCoords(e);
+    const { bx, by, index } = getBlockIndex(coords.x, coords.y);
+
+    if (hoveredBlock && (hoveredBlock.bx !== bx || hoveredBlock.by !== by)) {
+      // Redraw previous hovered block to remove highlight
+      renderBlock(hoveredBlock.bx, hoveredBlock.by);
+      hoveredBlock = null;
+    }
+
+    if (!hoveredBlock || hoveredBlock.bx !== bx || hoveredBlock.by !== by) {
+      // Draw highlight
+      if (state.hasPixelated && bx < state.blocksX && by < state.blocksY) {
+        const rect = getBlockPixelRect(bx, by);
+        mainCtx.save();
+        mainCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+        mainCtx.lineWidth = 1.5;
+        mainCtx.strokeRect(rect.x + 0.75, rect.y + 0.75, rect.w - 1.5, rect.h - 1.5);
+        mainCtx.restore();
+        hoveredBlock = { bx, by };
+      }
+    }
+
+    // Handle stroke drawing
+    if (state.isDrawing && state.currentStroke && state.hasPixelated) {
+      if (!state.strokeVisited.has(index)) {
+        state.strokeVisited.add(index);
+        const oldColor = getColorAtIndex(state.currentData, index);
+        const newColor = state.activeColor;
+        // Skip if colors are the same
+        if (oldColor[0] === newColor[0] && oldColor[1] === newColor[1] &&
+            oldColor[2] === newColor[2] && oldColor[3] === newColor[3]) {
+          return;
+        }
+        setColorAtIndex(state.currentData, index, newColor);
+        renderBlock(bx, by);
+        state.currentStroke.changes.push({
+          index,
+          oldColor: [...oldColor],
+          newColor: [...newColor],
+        });
+      }
+    }
+  });
+
+  mainCanvas.addEventListener('mouseleave', () => {
+    if (hoveredBlock) {
+      renderBlock(hoveredBlock.bx, hoveredBlock.by);
+      hoveredBlock = null;
+    }
+  });
+
+  // ──────────────────────────────────────────────
+  // Canvas Click Handler (Paint / Eyedropper / Reset)
+  // ──────────────────────────────────────────────
+  mainCanvas.addEventListener('mousedown', (e) => {
+    if (!state.hasPixelated) return;
+    if (e.button !== 0) return; // left click only
+
+    const coords = canvasCoords(e);
+    const { bx, by, index } = getBlockIndex(coords.x, coords.y);
+    if (bx >= state.blocksX || by >= state.blocksY) return;
+
+    if (state.currentTool === 'eyedropper') {
+      const rgba = getColorAtIndex(state.currentData, index);
+      setActiveColor(rgba, 'eyedropper');
+      return;
+    }
+
+    if (state.currentTool === 'resetPixel') {
+      resetBlock(index);
+      return;
+    }
+
+    // Paint tool
+    state.isDrawing = true;
+    state.currentStroke = { changes: [] };
+    state.strokeVisited = new Set();
+    state.strokeVisited.add(index);
+
+    const oldColor = getColorAtIndex(state.currentData, index);
+    const newColor = state.activeColor;
+    setColorAtIndex(state.currentData, index, newColor);
+    renderBlock(bx, by);
+    state.currentStroke.changes.push({
+      index,
+      oldColor: [...oldColor],
+      newColor: [...newColor],
+    });
+  });
+
+  document.addEventListener('mouseup', (e) => {
+    if (!state.isDrawing) return;
+    state.isDrawing = false;
+
+    if (state.currentStroke && state.currentStroke.changes.length > 0) {
+      state.undoStack.push(state.currentStroke);
+      if (state.undoStack.length > state.maxUndo) {
+        state.undoStack.shift();
+      }
+      state.redoStack = [];
+      updateUndoRedoBtns();
+    }
+    state.currentStroke = null;
+    state.strokeVisited = null;
+  });
+
+  // Right-click: reset pixel
+  mainCanvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (!state.hasPixelated) return;
+    const coords = canvasCoords(e);
+    const { bx, by, index } = getBlockIndex(coords.x, coords.y);
+    if (bx >= state.blocksX || by >= state.blocksY) return;
+    resetBlock(index);
+  });
+
+  function resetBlock(index) {
+    const oldColor = getColorAtIndex(state.currentData, index);
+    const originalColor = getColorAtIndex(state.originalData, index);
+    // Skip if already original
+    if (oldColor[0] === originalColor[0] && oldColor[1] === originalColor[1] &&
+        oldColor[2] === originalColor[2] && oldColor[3] === originalColor[3]) {
+      return;
+    }
+    copyColorFromTo(state.originalData, state.currentData, index);
+
+    const by = Math.floor(index / state.blocksX);
+    const bx = index % state.blocksX;
+    renderBlock(bx, by);
+
+    state.undoStack.push({
+      changes: [{
+        index,
+        oldColor: [...oldColor],
+        newColor: [...originalColor],
+      }],
+    });
+    if (state.undoStack.length > state.maxUndo) state.undoStack.shift();
+    state.redoStack = [];
+    updateUndoRedoBtns();
+  }
+
+  // ──────────────────────────────────────────────
+  // Undo / Redo
+  // ──────────────────────────────────────────────
+  function undo() {
+    if (state.undoStack.length === 0) return;
+    const action = state.undoStack.pop();
+    state.redoStack.push({ changes: [] });
+
+    for (const change of action.changes) {
+      const oldColor = getColorAtIndex(state.currentData, change.index);
+      setColorAtIndex(state.currentData, change.index, change.oldColor);
+      state.redoStack[state.redoStack.length - 1].changes.push({
+        index: change.index,
+        oldColor: [...oldColor],
+        newColor: [...change.oldColor],
+      });
+
+      const by = Math.floor(change.index / state.blocksX);
+      const bx = change.index % state.blocksX;
+      renderBlock(bx, by);
+    }
+
+    updateUndoRedoBtns();
+  }
+
+  function redo() {
+    if (state.redoStack.length === 0) return;
+    const action = state.redoStack.pop();
+    state.undoStack.push({ changes: [] });
+
+    for (const change of action.changes) {
+      const oldColor = getColorAtIndex(state.currentData, change.index);
+      setColorAtIndex(state.currentData, change.index, change.oldColor);
+      state.undoStack[state.undoStack.length - 1].changes.push({
+        index: change.index,
+        oldColor: [...oldColor],
+        newColor: [...change.oldColor],
+      });
+
+      const by = Math.floor(change.index / state.blocksX);
+      const bx = change.index % state.blocksX;
+      renderBlock(bx, by);
+    }
+
+    if (state.undoStack.length > state.maxUndo) state.undoStack.shift();
+    updateUndoRedoBtns();
+  }
+
+  function updateUndoRedoBtns() {
+    undoBtn.disabled = state.undoStack.length === 0;
+    redoBtn.disabled = state.redoStack.length === 0;
+  }
+
+  undoBtn.addEventListener('click', undo);
+  redoBtn.addEventListener('click', redo);
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+    } else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      redo();
+    }
+  });
+
+  // ──────────────────────────────────────────────
+  // Tool Switching
+  // ──────────────────────────────────────────────
+  const toolLabels = { paint: '画笔', eyedropper: '吸管', resetPixel: '重置像素' };
+  const toolEmoji = { paint: '🖌', eyedropper: '💉', resetPixel: '↩' };
+
+  function setTool(tool) {
+    state.currentTool = tool;
+    // Update button states
+    toolPaint.classList.toggle('active', tool === 'paint');
+    toolEyedropper.classList.toggle('active', tool === 'eyedropper');
+    toolResetPixel.classList.toggle('active', tool === 'resetPixel');
+    // Update canvas cursor mode
+    canvasWrapper.classList.remove('paint-mode', 'eyedropper-mode', 'reset-pixel-mode');
+    canvasWrapper.classList.add(tool + '-mode');
+    // Update info
+    updateCanvasInfo();
+  }
+
+  function updateCanvasInfo() {
+    if (!state.hasPixelated) {
+      if (state.hasImage) {
+        canvasInfo.textContent = `已导入图片 (${state.imageWidth}×${state.imageHeight}) → 缩放至512×512 · 请设定块大小并生成像素画`;
+      } else {
+        canvasInfo.textContent = '未加载图片';
+      }
+      return;
+    }
+    const toolName = toolLabels[state.currentTool] || '';
+    canvasInfo.textContent = `${toolEmoji[state.currentTool]} ${toolName} · ${state.blocksX}×${state.blocksY} 块 · 块大小 ${state.blockSize}px`;
+  }
+
+  toolPaint.addEventListener('click', () => setTool('paint'));
+  toolEyedropper.addEventListener('click', () => setTool('eyedropper'));
+  toolResetPixel.addEventListener('click', () => setTool('resetPixel'));
+
+  // ──────────────────────────────────────────────
+  // Reset All
+  // ──────────────────────────────────────────────
+  resetAllBtn.addEventListener('click', () => {
+    if (!state.hasPixelated) return;
+    if (!confirm('确定要将所有像素恢复为原始颜色吗？此操作可以撤销。')) return;
+
+    const changes = [];
+    for (let i = 0; i < state.blocksX * state.blocksY; i++) {
+      const oldColor = getColorAtIndex(state.currentData, i);
+      const origColor = getColorAtIndex(state.originalData, i);
+      if (oldColor[0] !== origColor[0] || oldColor[1] !== origColor[1] ||
+          oldColor[2] !== origColor[2] || oldColor[3] !== origColor[3]) {
+        changes.push({
+          index: i,
+          oldColor: [...oldColor],
+          newColor: [...origColor],
+        });
+      }
+    }
+
+    if (changes.length === 0) return;
+
+    // Apply reset
+    for (const change of changes) {
+      setColorAtIndex(state.currentData, change.index, change.newColor);
+    }
+
+    state.undoStack.push({ changes });
+    if (state.undoStack.length > state.maxUndo) state.undoStack.shift();
+    state.redoStack = [];
+
+    renderToDisplay();
+    updateUndoRedoBtns();
+  });
+
+  // ──────────────────────────────────────────────
+  // Export
+  // ──────────────────────────────────────────────
+  function updateExportBtns() {
+    const ready = state.hasPixelated;
+    exportPng.disabled = !ready;
+    exportJpg.disabled = !ready;
+    exportWebp.disabled = !ready;
+    updateExportSizeInfo();
+  }
+
+  function doExport(format, mimeType, quality) {
+    if (!state.hasPixelated) return;
+
+    const enlarge = exportEnlarge.checked;
+    let scale = parseInt(exportScale.value) || 1;
+    scale = Math.max(1, Math.min(10, scale));
+
+    let exportW, exportH;
+    if (enlarge) {
+      exportW = state.blocksX * state.blockSize * scale;
+      exportH = state.blocksY * state.blockSize * scale;
+    } else {
+      exportW = 512 * scale;
+      exportH = 512 * scale;
+    }
+
+    // Create export canvas
+    const expCanvas = document.createElement('canvas');
+    expCanvas.width = exportW;
+    expCanvas.height = exportH;
+    const expCtx = expCanvas.getContext('2d');
+
+    if (format === 'jpg') {
+      // JPG doesn't support alpha — fill white background
+      expCtx.fillStyle = '#FFFFFF';
+      expCtx.fillRect(0, 0, exportW, exportH);
+    }
+
+    // Calculate block size on export canvas
+    const exportBlockW = enlarge ? (state.blockSize * scale) : Math.ceil(512 * scale / state.blocksX);
+    const exportBlockH = enlarge ? (state.blockSize * scale) : Math.ceil(512 * scale / state.blocksY);
+
+    // Handle potential remainder for non-enlarged mode
+    const totalW = enlarge ? state.blocksX * state.blockSize * scale : 512 * scale;
+    const totalH = enlarge ? state.blocksY * state.blockSize * scale : 512 * scale;
+
+    for (let by = 0; by < state.blocksY; by++) {
+      for (let bx = 0; bx < state.blocksX; bx++) {
+        const idx = by * state.blocksX + bx;
+        const rgba = getColorAtIndex(state.currentData, idx);
+        expCtx.fillStyle = rgbaToCss(rgba);
+
+        const ex = bx * exportBlockW;
+        const ey = by * exportBlockH;
+        const ew = (bx === state.blocksX - 1) ? (totalW - ex) : exportBlockW;
+        const eh = (by === state.blocksY - 1) ? (totalH - ey) : exportBlockH;
+        expCtx.fillRect(ex, ey, ew, eh);
+      }
+    }
+
+    // Trigger download
+    expCanvas.toBlob((blob) => {
+      if (!blob) {
+        alert('导出失败：浏览器不支持此格式。');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const ext = format;
+      const sizeLabel = enlarge
+        ? `${state.blocksX * state.blockSize * scale}x${state.blocksY * state.blockSize * scale}`
+        : `${512*scale}x${512*scale}`;
+      a.download = `pixel-art_${sizeLabel}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, mimeType, quality);
+  }
+
+  exportPng.addEventListener('click', () => doExport('png', 'image/png'));
+  exportJpg.addEventListener('click', () => doExport('jpg', 'image/jpeg', 0.95));
+  exportWebp.addEventListener('click', () => doExport('webp', 'image/webp', 0.95));
+
+  // ──────────────────────────────────────────────
+  // Enable/Disable edit tools based on state
+  // ──────────────────────────────────────────────
+  function updateEditToolState() {
+    const ready = state.hasPixelated;
+    toolPaint.disabled = !ready;
+    toolEyedropper.disabled = !ready;
+    toolResetPixel.disabled = !ready;
+    if (!ready) {
+      canvasWrapper.classList.remove('eyedropper-mode', 'reset-pixel-mode');
+      canvasWrapper.classList.add('paint-mode');
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // Export enlarge toggle → show/hide scale
+  // ──────────────────────────────────────────────
+  exportEnlarge.addEventListener('change', () => {
+    exportScaleRow.style.display = exportEnlarge.checked ? 'flex' : 'none';
+    updateExportSizeInfo();
+  });
+  exportScale.addEventListener('input', updateExportSizeInfo);
+
+  function updateExportSizeInfo() {
+    if (!state.hasPixelated) {
+      exportSizeInfo.textContent = '';
+      return;
+    }
+    let scale = parseInt(exportScale.value) || 1;
+    scale = Math.max(1, Math.min(10, scale));
+    const enlarge = exportEnlarge.checked;
+    const w = enlarge ? state.blocksX * state.blockSize * scale : 512 * scale;
+    const h = enlarge ? state.blocksY * state.blockSize * scale : 512 * scale;
+    exportSizeInfo.textContent = `导出尺寸: ${w}×${h} px`;
+  }
+
+  // ──────────────────────────────────────────────
+  // Initial state setup
+  // ──────────────────────────────────────────────
+  updateEditToolState();
+  updateExportBtns();
+  updateUndoRedoBtns();
+  resetAllBtn.disabled = true;
+  exportScaleRow.style.display = exportEnlarge.checked ? 'flex' : 'none';
+
+  // Draw initial empty canvas (transparent → CSS checkerboard shows through)
+  mainCtx.clearRect(0, 0, 512, 512);
+  mainCtx.fillStyle = 'rgba(0,0,0,0.35)';
+  mainCtx.font = 'bold 18px -apple-system, BlinkMacSystemFont, sans-serif';
+  mainCtx.textAlign = 'center';
+  mainCtx.fillText('📁 导入图片以开始', 256, 248);
+  mainCtx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
+  mainCtx.fillStyle = 'rgba(0,0,0,0.2)';
+  mainCtx.fillText('支持 PNG / JPG / WebP / GIF 等格式', 256, 276);
+
+  console.log('🎨 像素画编辑器已就绪');
+  console.log('  - 导入图片 → 设定块大小 → 生成像素画');
+  console.log('  - 画笔/吸管/重置像素 工具');
+  console.log('  - Ctrl+Z 撤销 · Ctrl+Y 重做');
+  console.log('  - 右键重置像素');
+  console.log('  - 导出 PNG/JPG/WebP');
+})();
+</script>
+</body>
 </html>
